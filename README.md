@@ -1,5 +1,15 @@
-# docker-registry : <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; query a registry without downloading images #
+# docker-registry <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *query a registry without downloading images* #
 
+
+* [Description](#description)
+* [Quick tutorial](#quick-tutorial)
+* [Installation](#installation)
+* [Usage](#usage)
+* [Background documentation](#background-documentation)
+* [Alternatives for this script](#alternatives-for-this-script)
+
+
+## Description ##
 The `docker-registry` is a command line utility than fetches image info from a remote docker registry without needing to download the image. The command `docker inspect` works only on local images which first must be downloaded using `docker pull`. For inspecting a large image on the registry this causes unnecessary network traffic and waiting time.  The  `docker-registry` commanßd line utility can do the inspection without doing any image download by using the docker registry REST-API to query information about the image.
 
 The `docker-registry` lets you query the following info from a remote registry server: 
@@ -281,7 +291,7 @@ Articles about using registry REST-API on:
 * docker's registry(docker.io): [article "Inspecting Docker images without pulling them"](https://medium.com/hackernoon/inspecting-docker-images-without-pulling-them-4de53d34a604)
 * github's registry(ghcr.io): [article "Checking in on GitHub Container Registry"](https://blog.atomist.com/github-container-registry/)
 
-### Reference ocumentation
+### Reference documentation
 
 
 Registry API
@@ -311,7 +321,7 @@ JWT
  * [What is the structure of a JWT - Java Brains](https://www.youtube.com/watch?v=_XbXkVdoG_0)
 
 
-# Alternatives for this script #
+## Alternatives for this script ##
 
 There are some alternatives for the `docker-registry` utility, but for querying a remote registry the `docker-registry` works better then all of them.
 
