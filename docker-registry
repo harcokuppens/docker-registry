@@ -1,0 +1,918 @@
+#!/bin/bash
+
+
+# ============================================================================================================
+#                                    docker-registry
+# ============================================================================================================
+
+USAGE="
+    Description:
+      Fetch from a remote docker registry image info without needing to download the image.
+
+      A manifestlist implements a multi-arch image by listing the same docker image but build
+      for different os/arch platforms.
+
+      A manifest for an image for a specific os/arch platform specifies how to download the image config
+      and layers for that os/arch platfrom. A manifestlist has thus a manifest per os/arch platform.
+
+      The content addressable setup of docker means that we have
+       * digest: id for a manifest; the sha256 digest of the image manifest.
+       * id : id for the image; the sha256 digest of the image config.
+
+    Usage:
+      docker-registry [options] tags [REGISTRY/]IMAGE
+
+      docker-registry [options] manifestlist [REGISTRY/]IMAGE[:TAG]
+
+      docker-registry [options] digest [REGISTRY/]IMAGE[:TAG]
+      docker-registry [options] manifest [REGISTRY/]IMAGE[:TAG|@DIGEST]
+
+
+      docker-registry [options] id [REGISTRY/]IMAGE[:TAG|@DIGEST]
+      docker-registry [options] config [REGISTRY/]IMAGE[:TAG|@DIGEST]
+
+      docker-registry [options] downloadlayer [REGISTRY/]IMAGE@LAYER_DIGEST
+
+      docker-registry           verifytool [REGISTRY/]IMAGE[:TAG]
+
+    Options:
+      -h  or  --help                print help (this message) and exit
+      -r                            enables raw output. Without this option the json output will be human
+                                    readable formatted.
+      -u PERSON_OR_ORG:PASSWORD     credentials needed only for accessing none-public images
+      --os OS                       specify the operating system of the image (default is linux)
+      --arch ARCH                   specify the cpu architecture of the image (default is arch of current machine)
+
+    Notes:
+      The REGISTRY argument is by default 'docker.io', for github's registry you should use 'ghcr.io'.
+      The LAYER_DIGEST argument can be found in the manifest of an image where for each layer its digest and its size
+           is specified.  Note: don't use the digests in the image config, because they are digests from the
+           unpacked layers. Whereas the manifest contains digests for the compressed layers ready for fast downloads.
+
+"
+
+# background documentation
+#=========================
+
+# inception of this script
+#-------------------------
+# docker's registry(docker.io): https://medium.com/hackernoon/inspecting-docker-images-without-pulling-them-4de53d34a604
+# github's registry(ghcr.io): https://blog.atomist.com/github-container-registry/
+
+# background docs
+#-----------------
+
+# registry api
+#   https://docs.docker.com/registry/spec/api/
+
+# Explaining Docker Image IDs
+#   https://windsock.io/explaining-docker-image-ids/
+
+# manifest
+#   https://docs.docker.com/engine/reference/commandline/manifest/
+#   https://docs.docker.com/registry/spec/manifest-v2-2/
+
+# authentication
+#   https://docs.docker.com/registry/spec/auth/jwt/
+#   https://docs.docker.com/registry/spec/auth/scope/
+
+# OAuth 
+#   What is OAuth really all about (using JWT toke) - OAuth tutorial - Java Brains https://www.youtube.com/watch?v=t4-416mg6iU
+#   OAuth terminologies and flows explained  - OAuth tutorial - Java Brains https://www.youtube.com/watch?v=3pZ3Nh8tgTE
+#    => flow 3 is used where in the first step you also authenticate with user/password credentials to get authorization token (in JWT format)
+# JWT
+#    What is JWT authorization really about - Java Brains  https://www.youtube.com/watch?v=soGRyl9ztjI
+#    What is the structure of a JWT - Java Brains  https://www.youtube.com/watch?v=_XbXkVdoG_0
+
+
+# alternative for this script
+#----------------------------
+# skopeo inspect: alternative for this script 'config' command
+#     https://polyverse.com/blog/skopeo-the-best-container-tool-you-need-to-know-about/
+#     https://github.com/containers/skopeo
+#
+# manifest-tool: alternative for this script 'manifest' 'manifestlist' commands
+#     https://github.com/estesp/manifest-tool
+
+
+
+
+# Script
+#========
+
+# make script exit early on errors
+set -eE  # BEST: traps error in subshell with right linenumber in code
+         # we set this also for every function, because when in subshells
+         # set -eE is not inherited. By setting it in every function we
+         # sure it is enabled again.
+         # e.g. when calling a function in command substition
+         #   manifest_digest=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+         #                    `-> runs in subshell
+set -u   # script ends with signal EXIT when unset variable is used
+#trap 'printf "\ntrap ERR errorcode:$? at linenumber:$LINENO !\n"' ERR
+#set -x # trace
+
+
+
+# https://unix.stackexchange.com/questions/256873/error-exit-script-from-within-command-substitution
+MAIN_SHELL_PID=$$
+
+# global variables
+REGISTRY_URL=""
+AUTH_URL=""
+TOKEN=""
+VERBOSE="false"
+EXTRA_VERBOSE="false"
+FORMATTER="jq"
+OS="linux"
+ARCH=$(uname -m)
+if [[ "$ARCH" == "aarch64" ]]
+then
+   # arm64 on macos and aarch64 on linux are the same arch
+   # docker uses the term "arm64"
+   ARCH="arm64"
+fi
+
+
+main() {
+  # get optional options
+  local credentials=""
+
+  if [[ "$#" == "0" ]] ; then
+    printf "$USAGE"
+    exit 0
+  fi 
+   
+  while [[ "$1" == -* ]]
+  do 
+      if [[ "$1" == "-h" || "$1" == "--help" ]] ; then
+        printf "$USAGE"
+        exit 0
+      fi  
+      if [[ "$1" == "-v" ]] ; then
+        VERBOSE="true"
+        shift 1
+      fi  
+      if [[ "$1" == "-vv" ]] ; then
+        VERBOSE="true"
+        EXTRA_VERBOSE="true"
+        shift 1
+      fi  
+      if [[ "$1" == "-r" ]] ; then
+        FORMATTER="cat"
+        shift 1
+      fi  
+  
+      if [[ "$1" == "-u" ]] ; then
+        credentials="$2"
+        shift 2
+      fi   
+  
+      if [[ "$1" == "--os" ]] ; then
+        OS="$2"
+        shift 2
+      fi 
+  
+      if [[ "$1" == "--arch" ]] ; then
+        ARCH="$2"
+        if [[ "$ARCH" == "aarch64" ]]
+        then
+           # arm64 on macos and aarch64 on linux are the same arch
+           # docker uses the term "arm64"    
+           arch="arm64"
+        fi    
+        shift 2
+      fi 
+  done
+
+  
+  # get args
+
+  if [[  "$#" != "2" ]]
+  then
+      printf "\nERROR: 2 arguments required but $# given!\n$USAGE" >&2
+      exit 1
+  fi
+
+  local command="$1"
+  local argument="$2"
+
+  # verify command argument
+  if  ! [[ "$command" == "tags"  || "$command" == "config" || "$command" == "id" || "$command" == "digest" ||  "$command" == "manifestlist" ||  "$command" == "manifest"  ||  "$command" == "downloadlayer" ||  "$command" == "verifytool" ]]
+  then
+      printf "\nERROR: wrong command '$1'; command must be in [config,id,digest,downloadlayer,manifest,manifestlist,tags]\n$USAGE" >&2
+      exit 1
+  fi
+
+# parse argument into  registry,image,tag,digest parts
+#----------------------------------------------------
+#
+# background info to explain parsing:
+#
+#  https://docs.docker.com/engine/reference/commandline/tag/
+#
+#    IMAGE[:TAG]
+#
+#    An image name is made up of slash-separated name components, optionally prefixed by a registry hostname.
+#                                                                                                         ,-> . allowed in name component
+#    Name components may contain lowercase letters, digits and separators. A separator is defined as a period, one
+#    or two underscores, or one or more dashes. A name component may not start or end with a separator.
+#
+#    The hostname must comply with standard DNS rules, but may not contain underscores.
+#    If a hostname is present, it may optionally be followed by a port number in the format :8080.
+#    If not present, the command uses Docker’s public registry located at registry-1.docker.io by default.
+#       `-> how do we know this??
+#
+#    A tag name must be valid ASCII and may contain lowercase and uppercase letters, digits, underscores, periods
+#    and dashes. A tag name may not start with a period or a dash and may contain a maximum of 128 characters.
+#
+#  https://docs.docker.com/engine/reference/commandline/pull/#pull-an-image-by-digest-immutable-identifier
+#
+#   Docker enables you to pull an image by its digest. When pulling an image by digest, you specify exactly which version
+#   of an image to pull. Doing so, allows you to “pin” an image to that version, and guarantee that the image you’re
+#   using is always the same.
+#
+#     syntax:    IMAGE@DIGEST
+#
+#  https://docs.docker.com/registry/spec/api/#overview
+#
+#  Classically, repository names have always been two path components where each path component is less than 30
+#  characters. The V2 registry API does not enforce this. The rules for a repository name are as follows:
+#
+#  A repository name is broken up into path components. A component of a repository name must be at least one lowercase,
+#  alpha-numeric characters, optionally separated by periods, dashes or underscores. More strictly, it must match the
+#  regular expression [a-z0-9]+(?:[._-][a-z0-9]+)*.
+#
+#  If a repository name has two or more path components, they must be separated by a forward slash (“/”).
+#
+#  The total length of a repository name, including slashes, must be less than 256 characters.
+#
+#  These name requirements only apply to the registry API and should accept a superset of what is supported by other
+#  docker ecosystem components.
+#
+#   => so IMAGE above is actually the image's repository name, within a repository there can be images with
+#      same name but different tag/digest
+#
+# THUS full syntax:
+#
+#        IMAGE_REPO = [ REGISTRY_HOSTNAME '/' ] NAME_COMPONENT ( '/' NAME_COMPONENT )*
+#
+#        IMAGE =  IMAGE_REPO[:TAG|@DIGEST]
+#
+#        => details see: https://ktomk.github.io/pipelines/doc/DOCKER-NAME-TAG.html
+#
+
+
+#    question: how do we know whether the first part (before a /) is a name component or a registry hostname?
+#    answer:  a hostname must contain dots to be valid, whereas a name component may not have dots!!
+#             so if it contains dots then it is a hostname, else a name component
+#
+#     UPDATE: a name component may contain dots, but I don't know how to separate hostname out then?
+#             So I decided to:
+#                       just take first part of string splitted by /
+#                       and if that contains a .  the it is hostname, else it is a name component!
+  local registry=""
+  if [[ "$argument" == *"/"* ]]
+  then
+     local possible_hostname=""
+     possible_hostname=$(printf "$argument" | sed 's/\/.*//')
+     if [[ "$possible_hostname" == *"."*  ]]
+     then
+       registry="$possible_hostname"
+       # strip hostname from argument  (because can have :port in its name)
+       argument=$(printf "$argument" | sed 's/[^\/]*\///' ) # non greedy  for /
+     fi
+  fi
+
+  local digest=""
+  local tag="latest" # default value for tag when not specified
+  local image="" # image_repo
+  if [[ "$argument" == *"@"* ]]
+  then
+    digest=$(echo "$argument" | sed 's/[^@]*@//') # non greedy for @
+    image=$(echo "$argument" | sed 's/@.*//')
+  else
+    # note tag in else case of digest, because digest contains a ':' char
+    if [[ "$argument" == *":"* ]]
+    then
+      tag=$(echo "$argument" | sed 's/[^:]*://') # non greedy for :
+      image=$(echo "$argument" | sed 's/:.*//')
+    else
+      # no digest, no tag
+      image="$argument"
+    fi
+  fi
+
+  if [[ "$tag" == "sha256:"* ]]
+  then
+    echo "ERROR: the 'tag' argument cannot be a digest; specify a digest with a '@' separator"  >&2
+    exit 1
+  fi
+
+  if [[ "$digest" != "" && "$digest" != "sha256:"* ]]
+  then
+    echo "ERROR: the 'layer_digest' argument is not a digest"  >&2
+    exit 1
+  fi
+
+  # docker is the default register;
+  # we also need a specific fix for docker to fix its register url
+  if  [[ "$registry" == "" || "$registry" == "docker.io" ]]
+  then
+      registry="registry-1.docker.io"
+  fi
+
+  REGISTRY_URL="https://${registry}"
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+    echo "Values after parsing arguments
+        COMMAND: $command
+        REGISTRY_URL: $REGISTRY_URL
+        IMAGE: $image
+        TAG: $tag
+        DIGEST: $digest
+    " >&2
+  fi
+
+  verify_registry
+  get_auth_challenge
+
+
+  # always we first need to get an token
+  local auth_scope="repository:$image:pull"
+  TOKEN=$(get_token "$auth_scope" "$credentials")
+
+  if  [[ "$command" == "tags" ]]
+  then      
+     get_image_tags  "$image"
+  fi
+
+  if  [[ "$command" == "manifestlist" ]]
+  then
+      manifestlist=$(get_manifestlist "$image" "$tag")
+      if [[ "$manifestlist" == *"manifest.list"* ]]; then
+          # its a manifestlist; return it
+          echo -E -n  "$manifestlist" | $FORMATTER
+      else
+          # its a manifest of some os/arch instead of a manifestlist
+          manifest="$manifestlist"
+          # get the digest of manifest
+          manifest_digest="sha256:"$(echo -E -n "$manifest"| sha256sum | cut -d' ' -f1)
+          # get the os/arch of manifest
+          config_digest=$(echo -E -n  "$manifest"  | jq -r '.config.digest')
+          if [[ "$config_digest" == "null" ]]; then
+             echo "ERROR: no manifestlist found, but there does exist a manifest digest '$manifest_digest'"
+             schemaVersion=$(echo -E -n  "$manifest"  | jq -r '.schemaVersion')
+             echo "ERROR: schemaVersion: $schemaVersion" >&2
+             #echo "ERROR: no config  in manifest"  >&2 ;
+             exit 1
+          fi
+          config=$(get_image_configuration "$image" "$config_digest")
+          architecture=$(echo -E -n  "$config" | jq -r '.architecture')
+          operatingsystem=$(echo -E -n  "$config" | jq -r '.os')
+          echo "ERROR: no manifestlist found, but there does exist a manifest for '$architecture/$operatingsystem' with (manifest) digest '$manifest_digest'"
+          exit 1
+      fi
+  fi
+
+  if  [[ "$command" == "digest" ]]
+  then
+      if [[ "$digest" != "" ]]
+      then
+          echo "ERROR: the 'digest' is given; this command only works when only 'tag' is given"  >&2
+          exit 1
+      fi
+      manifest_digest=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+      echo -E "$manifest_digest"
+  fi
+
+  if  [[ "$command" == "manifest" ]]
+  then
+      if [[ "$digest" != "" ]]
+      then
+          # get manifest of image by its identifier (independent of current selected os/arch)
+          get_manifest_by_digest "$image" "$digest"
+      else
+          # get manifest of image for a tag for the current selected os/arch
+          digest=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+          get_manifest_by_digest "$image" "$digest"
+      fi
+  fi
+
+  if  [[ "$command" == "config" ]]
+  then
+      if [[ "$digest" == "" ]]
+      then
+          # get digest of manifest of image for a tag for the current selected os/arch
+          digest=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+      fi
+
+      # declaration must be separate from assignment with command substition for errors to be caught
+      # see: https://stackoverflow.com/questions/20157938/exit-code-of-variable-assignment-to-command-substitution-in-bash#comment38560986_20157997 
+      local config_digest=""
+      config_digest=$(get_config_digest "$image" "$digest")
+      get_image_configuration "$image" "$config_digest"
+  fi
+  
+  if  [[ "$command" == "id" ]]
+  then
+      if [[ "$digest" == "" ]]
+      then
+          # get digest of manifest of image for a tag for the current selected os/arch
+          digest=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+      fi
+
+      # declaration must be separate from assignment with command substition for errors to be caught
+      # see: https://stackoverflow.com/questions/20157938/exit-code-of-variable-assignment-to-command-substitution-in-bash#comment38560986_20157997 
+      local config_digest=""
+      config_digest=$(get_config_digest "$image" "$digest")
+      # image id is the digest of the configuration object of the image
+      echo -E "$config_digest"
+  fi
+
+  if  [[ "$command" == "downloadlayer" ]]
+  then
+      # note: digest in this case it the layer digest, and not a manifest digest
+      downloadlayer "$image" "$digest"
+  fi
+
+  if  [[ "$command" == "verifytool" ]]
+  then
+      # verify tool is working correct by running some tests
+      if [[ "$digest" != "" ]]
+      then
+          echo "ERROR: the 'digest' is given; this command only works when only 'tag' is given"  >&2
+          exit 1
+      fi
+      verifytool "$image" "$tag"
+  fi
+
+}
+
+# https://docs.docker.com/registry/spec/api/#api-version-check
+# API Version Check
+#
+#  A minimal endpoint, mounted at /v2/ will provide version support information based on its response statuses. The
+#  request format is as follows:
+#
+#     GET /v2/
+#
+#  If 404 Not Found response status, or other unexpected status, is returned, the client should proceed with the
+#  assumption that the registry does not implement V2 of the API.
+#
+#  When a "200 OK" or "401 Unauthorized" response is returned, the “Docker-Distribution-API-Version” header should be
+#  set to “registry/2.0”. Clients may require this header value to determine if the endpoint serves this API.
+verify_registry() {
+  set -eE
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+    echo "Verify  REGISTRY_URL.
+        REGISTRY_URL: $REGISTRY_URL
+    " >&2
+  fi
+
+  # we check REGISTRY_URL  uses registry API and json output
+  # a) first get headers -> will give error for wrong url
+  headers=$(curl --show-error -I --silent --location  "${REGISTRY_URL}/v2/")
+  # b) check in headers if URL returns JSON
+  #    header in curl -I: 'docker-distribution-api-version: registry/2.0'
+  if ! echo "$headers" |grep -i 'docker-distribution-api-version:' | grep -i -q 'registry/2.0'
+  then
+    echo "ERROR: invalid registry url '${REGISTRY_URL}/v2/" >&2
+    echo "       request to url doesn't return right API header" >&2
+    exit 1
+  fi
+  # c) check in headers if URL returns JSON
+  #    header in curl -I: 'content-type: application/json'
+  if ! echo "$headers" |grep -i 'content-type:' | grep -i -q 'application/json'
+  then
+    echo "ERROR: invalid registry url '${REGISTRY_URL}/v2/' because doesn't return JSON" >&2
+    exit 1
+  fi
+
+}
+
+# src: https://docs.docker.com/registry/spec/auth/token/
+# if you do request without authorization token, then the HTTP Response Header will be indicating the auth challenge
+get_auth_challenge() {
+  set -eE
+
+  # 1) do request without authorization token, and fetch 'www-authenticate:' response header
+  authheader=$(curl -i --location  --silent ${REGISTRY_URL}/v2/ | grep -i www-authenticate:)
+  # 2) from this header fetch the authorization server(realm) and service name
+  # note: set found values in global variables
+  AUTH_URL=$(echo $authheader |sed 's/.*realm="//' | sed 's/".*//')
+  AUTH_SERVICE=$(echo $authheader |sed 's/.*service="//' | sed 's/".*//')
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+    echo "Found auth challenge.
+        AUTH_URL: $AUTH_URL
+        AUTH_SERVICE: $AUTH_SERVICE
+    " >&2
+  fi
+
+  # technical  note:
+  #   curl with -I option on  "${REGISTRY_URL}/v2/" :
+  #      we get only headers, but then we don't get www-authenticate header
+  #   curl with -i option on  "${REGISTRY_URL}/v2/" :
+  #      we get www-authenticate header, but we can get a very long webpage download of a wrong url
+  #      => therefore we first verify the registry url. A good registry url only gives a short
+  #         UNAUTHORIZED json response to above request.
+
+  # values to test this function;
+  #  if  [[ "$registry" == "$docker" ]]
+  #  then
+  #      # for docker's registry http://hub.docker.com. https://hub.docker.com/u/harcokuppens
+  #      AUTH_URL="https://auth.docker.io/token"
+  #      AUTH_SERVICE="registry.docker.io"
+  #      REGISTRY_URL="https://registry-1.docker.io"
+  #  fi
+  #  if  [[ "$registry" == "github" ]]
+  #  then
+  #      # for github's registry ghcr.io https://github.com/harcokuppens?tab=packages.
+  #      AUTH_URL="https://ghcr.io/token"
+  #      AUTH_SERVICE="ghcr.io"
+  #      REGISTRY_URL="https://ghcr.io"
+  #  fi
+}
+
+# https://docs.docker.com/registry/spec/api/#errors
+#  for a failure the registry returns a json message with 'errors'
+verify_json_result() {
+     set -eE
+     local json_result="$1"
+     # let end user of this function specify the location of the error for nice error message
+     # without location the function does a quiet exit on an error
+     local location="$2"
+
+     result=$(echo -E -n "$json_result" | jq -r '.errors')
+     # jq returns "null" when the filter does not match
+     if [[ "$result" != "null" ]]
+     then
+         if [[ "$location" != "" ]]
+         then
+           printf "\nERROR: in $location:\n" >&2
+           echo -E -n "$json_result"| jq >&2
+         fi
+         exit 1;
+     fi
+}
+
+# docs at https://docs.docker.com/registry/spec/auth/token/
+get_token() {
+  set -eE
+
+  local auth_scope="$1"
+  local credentials=""
+  if [ "$2" != "" ] ; then
+      credentials="-u $2"
+  fi
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+      echo "Retrieving access token.
+        IMAGE: $image
+        AUTH_SCOPE: $auth_scope
+      " >&2
+  fi
+
+  if [[ "$EXTRA_VERBOSE" == "true" ]]
+  then
+      echo URL: "${AUTH_URL}?scope=${auth_scope}" >&2
+  fi
+
+  json_result=$(curl \
+    --silent \
+    $credentials  \
+    "${AUTH_URL}?service=${AUTH_SERVICE}&scope=${auth_scope}" )
+  verify_json_result "$json_result" "finding token"
+  echo -E -n "$json_result" | jq -r '.token'
+}
+
+get_image_tags() {
+    set -eE
+
+    local image="$1"
+
+    if [[ "$VERBOSE" == "true" ]]
+    then
+        echo "Retrieving Image's tags.
+          IMAGE:  $image
+          TOKEN:  $TOKEN
+        " >&2
+    fi
+
+    if [[ "$EXTRA_VERBOSE" == "true" ]]
+    then
+        echo URL: "${REGISTRY_URL}/v2/$image/tags/list" >&2
+    fi
+            
+    json_result=$(curl \
+      --silent \
+      --location \
+      --header "Authorization: Bearer $TOKEN" \
+      "${REGISTRY_URL}/v2/$image/tags/list" )
+    verify_json_result "$json_result" "listing image tags"
+    echo -E -n "$json_result" | jq -cM '.tags'
+} 
+
+get_manifestlist() {
+  set -eE
+
+  local image=$1
+  local tag=$2
+
+  # scenarios:
+  # 1) you don't have the access rights for private image repository   => returns auth error (exit 1)
+  #                                                                       DENIED(github)/UNAUTHORIZED(docker)
+  #
+  # 2) manifestlist for image:ref  does not exist, then two cases
+  #         a) image:ref does exist                              => returns manifest  of only supported os/arch
+  #         2) image:ref does not exist                          => returns errors.code MANIFEST_UNKNOWN (exit 1)
+  # 3) manifestlist does  exist                                  => returns manifestlist
+
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+      echo "Retrieving image manifest list (lists for a specific image the manifests for the image builds for the different architectures)
+        IMAGE:  $image
+        TAG:    $tag
+        TOKEN:  $TOKEN
+      " >&2
+  fi
+
+  if [[ "$EXTRA_VERBOSE" == "true" ]]
+  then
+      echo URL: "${REGISTRY_URL}/v2/$image/manifests/$tag" >&2
+  fi
+
+  # note: we have Accept header for both manifest.list.v2 as manifest.v2
+  #       by default it will return manifest.list.v2 but if that not
+  #       exist then it will return a single manifest.v2 .
+  #       note: without the Accept header for manifest.v2 it could return manifest.v1
+  #             if that is stored on the registry. However with the manifest.v2
+  #             Accept header that will be converted to v2 before returning the manifest!
+  # see also https://docs.docker.com/registry/spec/manifest-v2-2/#backward-compatibility
+  json_result=$(curl \
+    --silent \
+    --header "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+    --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+    --header "Authorization: Bearer $TOKEN" \
+    "${REGISTRY_URL}/v2/$image/manifests/$tag" )
+   verify_json_result "$json_result" "getting manifestlist"
+   echo -E -n  "$json_result"
+
+}
+
+get_manifest_by_digest() {
+  set -eE
+
+  local image=$1
+  local manifest_digest=$2
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+      echo "Retrieving image manifest by digest (config and layers of an image)
+        IMAGE:  $image
+        MANIFEST_DIGEST: $manifest_digest
+        TOKEN:  $TOKEN
+      " >&2
+  fi
+
+  if [[ "$EXTRA_VERBOSE" == "true" ]]
+  then
+      echo URL: "${REGISTRY_URL}/v2/$image/manifests/$manifest_digest" >&2
+  fi
+
+  json_result=$(curl \
+    --silent \
+    --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+    --header "Authorization: Bearer $TOKEN" \
+    "${REGISTRY_URL}/v2/$image/manifests/$manifest_digest" )
+  verify_json_result "$json_result" "getting manifest"
+  echo -E -n "$json_result" | $FORMATTER
+}
+
+
+
+
+get_manifest_digest_for_a_tag_for_a_specific_os_arch() {
+  # get manifest for image for current selected os/arch
+  set -eE
+
+  local image=$1
+  local tag=$2
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+      echo "Retrieving image manifest digest by tag (config and layers of an image)
+        IMAGE:  $image
+        TAG:    $tag
+        TOKEN:  $TOKEN
+      " >&2
+  fi
+
+
+  digest=""
+  manifestlist=$(get_manifestlist "$image" "$tag")
+  if [[ "$manifestlist" != *"manifest.list"* ]]; then
+      # its a manifest of some os/arch instead of a manifestlist
+      # check if it is the right one
+      manifest="$manifestlist"
+      manifest_digest="sha256:"$(echo -E -n "$manifest"| sha256sum | cut -d' ' -f1)
+      # does the os/arch of manifest match the request os/arch?
+      config_digest=$(echo -E -n  "$manifest"  | jq -r '.config.digest')
+      if [[ "$config_digest" == "null" ]]; then
+          echo "ERROR: no config  in manifest so we cannot determine if it is for current os/arch"  >&2 ;
+          schemaVersion=$(echo -E -n  "$manifest"  | jq -r '.schemaVersion')
+          echo "ERROR: schemaVersion: $schemaVersion" >&2
+          echo "manifest found:">&2
+          echo -E  "$manifest">&2
+          exit 1
+      fi
+      config=$(get_image_configuration "$image" "$config_digest")
+      architecture=$(echo -E -n  "$config" | jq -r '.architecture')
+      operatingsystem=$(echo -E -n  "$config" | jq -r '.os')
+      if [[ "$operatingsystem/$architecture" == "$OS/$ARCH" ]]
+      then
+         # yes the manifest/digest is for os/arch we want, return it
+         echo  -E -n   "$manifest_digest"
+         return
+      else
+         # no, return mismatch error
+         echo "ERROR: no image manifest/digest found for '$OS/$ARCH'; an image exists only for '$operatingsystem/$architecture' with (manifest) digest '$manifest_digest' "  >&2
+         exit 1
+      fi
+  else
+      # get manifest_digest from manifestlist
+      manifest_digest=$(echo -E -n  "$manifestlist" | jq -r '.manifests[]|select(.platform.os=="'$OS'")|select(.platform.architecture=="'$ARCH'")|.digest')
+      if [[ "$manifest_digest" == "" ]]
+      then
+         echo "ERROR: no image manifest/digest found for '$OS/$ARCH' in manifestlist"  >&2
+         exit 1
+      fi
+      echo -E -n "$manifest_digest"
+  fi
+}
+
+get_config_digest() {
+  set -eE
+
+  local image=$1
+  local digest=$2
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+      echo "Retrieving digest for image configuration from image manifest
+      " >&2
+  fi
+  json_result=$(get_manifest_by_digest "$image" "$digest")
+  # note verify again but without output => needed to exit here if in above command substitution an error was detected
+  verify_json_result "$json_result" ""
+  config_digest=$(echo -E -n "$json_result" | jq -r '.config.digest')
+  if [[ "$config_digest" == "null" ]]; then
+    echo "ERROR: no config  in manifest"  >&2 ;
+    schemaVersion=$(echo -E -n  "$manifest"  | jq -r '.schemaVersion')
+    echo "ERROR: schemaVersion: $schemaVersion" >&2
+    exit 1
+  fi
+  echo -E -n "$config_digest"
+}
+
+
+get_image_configuration() {
+  set -eE
+
+  local image="$1"
+  local config_digest="$2"
+  
+  if [[ "$VERBOSE" == "true" ]]
+  then
+      echo "Retrieving Image Configuration.
+        IMAGE:  $image
+        TOKEN:  $TOKEN
+        CONFIGURATION_DIGEST: $config_digest
+      " >&2
+  fi
+
+  if [[ "$EXTRA_VERBOSE" == "true" ]]
+  then
+      echo URL: "${REGISTRY_URL}/v2/$image/blobs/$config_digest" >&2
+  fi
+
+  json_result=$(curl  \
+    --silent \
+    --location \
+    --header "Authorization: Bearer $TOKEN" \
+    "${REGISTRY_URL}/v2/$image/blobs/$config_digest" )
+       
+  verify_json_result "$json_result" "retrieving image config"
+  echo -E -n "$json_result" | $FORMATTER
+}
+
+downloadlayer() {
+  set -eE
+
+  local image="$1"
+  local layer_digest="$2"
+
+  if [[ "$VERBOSE" == "true" ]]
+  then
+      echo "Retrieving Image Configuration.
+        IMAGE:  $image
+        TOKEN:  $TOKEN
+        LAYER_DIGEST: $layer_digest
+      " >&2
+  fi
+
+  if [[ "$EXTRA_VERBOSE" == "true" ]]
+  then
+      echo URL: "${REGISTRY_URL}/v2/$image/blobs/$layer_digest" >&2
+  fi
+
+  layerfile="${layer_digest}.tgz"
+
+  # first check if downloading would be successfull by only doing header request
+  exitcode=0
+  curl_output=$(curl  \
+    --head\
+    --fail\
+    --silent \
+    --location \
+    --header "Authorization: Bearer $TOKEN" \
+    "${REGISTRY_URL}/v2/$image/blobs/$layer_digest") ||  exitcode="$?"
+  if [[ "$exitcode" != "0" ]]
+  then
+    if [[ "$exitcode" == "22" ]]
+    then
+       echo "ERROR: layer not found on server"
+    else
+       http_error=$(echo "$curl_output" | head -1)
+       echo "ERROR: http error: $http_error"
+       echo "      exiting curl with exitcode:$exitcode"
+    fi
+    exit $exitcode
+  fi
+
+  # if head request successfull do the real download
+  curl  \
+    --location \
+    --header "Authorization: Bearer $TOKEN" \
+    --output "$layerfile" \
+    "${REGISTRY_URL}/v2/$image/blobs/$layer_digest"
+
+  echo "layer downloaded to file '${layer_digest}.tgz'"
+
+}
+
+
+# verification of this tool:
+#
+#       1. compare the digest we get from
+#           a) get digest from manifestlist
+#                docker-registry digest [REGISTRY/]IMAGE[:TAG]
+#           b) fetching manifest and calculate its sha256 digest
+#                docker-registry -r manifest [REGISTRY/]IMAGE[:TAG] | sha256sum
+#       2. compare the id we get from
+#           a) digest from manifest
+#                docker-registry id [REGISTRY/]IMAGE[:TAG|@DIGEST]
+#           b) fetching config and calculate its sha256 digest
+#                docker-registry -r config [REGISTRY/]IMAGE[:TAG|@DIGEST] | sha256sum
+#
+verifytool() {
+  set -eE
+
+  local image="$1"
+  local tag="$2"
+
+  FORMATTER="cat" # raw output mode
+
+  # test 1
+  # get manifest_digest from manifestlist
+  manifest_digest1=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+  # fetch manifest using manifest_digest and calculate digest of result
+  manifest_digest2="sha256:$(get_manifest_by_digest "$image" "$manifest_digest1" | sha256sum | cut -d' ' -f1)"
+  if [[ "$manifest_digest1" == "$manifest_digest2" ]]
+  then
+       echo "PASSED manifest digest test"
+  else
+       echo "FAILED manifest digest test"
+  fi
+
+  # test 2
+  # get config_digest from manifest of image
+  config_digest1=$(get_config_digest "$image" "$manifest_digest1")
+  # fetch config using config_digest and calculate digest of result
+  config_digest2="sha256:$(get_image_configuration "$image" "$config_digest1" | sha256sum | cut -d' ' -f1)"
+  if [[ "$config_digest1" == "$config_digest2" ]]
+  then
+       echo "PASSED config digest test"
+  else
+       echo "FAILED config digest test"
+  fi
+}
+
+main "$@"
