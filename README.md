@@ -193,15 +193,14 @@ The `labels` command is extra defined for the convenience of easily fetching the
 
 
 
-The `docker-registry` utility is a simple script in `bash`, so you can easily fetch it from a release file on github:
+The `docker-registry` utility is a simple script in `bash`, so you can easily fetch it for a specific version from github:
 
 
     VERSION="v1.0.1" 
-    DOWNLOAD_URL="https://github.com/harcokuppens/docker-registry/archive/refs/tags/${VERSION}.tar.gz"
-	curl -s -L "$DOWNLOAD_URL" | tar -xvz -C "/tmp/ docker-registry-${VERSION}/docker-registry"
-	mv /tmp/docker-registry-${VERSION}/docker-registry /usr/local/bin 
+    DOWNLOAD_URL="https://raw.githubusercontent.com/harcokuppens/docker-registry/${VERSION}/docker-registry"
+    curl -o /usr/local/bin/docker-registry  "$DOWNLOAD_URL"
 	chmod a+x /usr/local/bin/docker-registry
-	export PATH="$PATH:/usr/local/bin"
+ 	export PATH="$PATH:/usr/local/bin"
 
       
 Requirements:  
