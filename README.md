@@ -199,6 +199,11 @@ The images `labels` are also part of the `config`, so with `jq` we can filter th
 
 The `labels` command is extra defined for the convenience of easily fetching the labels and does exactly the above.	
 
+You can easily fetch a specific label with:
+
+        $ docker-registry --arch amd64   labels  sphinxdoc/sphinx | jq -r '."org.opencontainers.image.revision"'
+        03e2a663ba5eff8f460336c59e732283d37ea0f6
+
  
 ## Installation ##
 
