@@ -1,10 +1,29 @@
-# docker-registry #
+# docker-registry : query a registry without downloading images #
 
-The `docker-registry` is a command line utility than fetches image info from a remote docker registry without needing to download the image. The command `docker inspect` works only on local images which first must be downloaded using `docker pull`. For inspecting a large image on the registry this causes unnecessary network traffic and waiting time.  The  `docker-registry` command line utility can do the inspection without doing any image download by using the docker registry REST-API to query information about the image.
+The `docker-registry` is a command line utility than fetches image info from a remote docker registry without needing to download the image. The command `docker inspect` works only on local images which first must be downloaded using `docker pull`. For inspecting a large image on the registry this causes unnecessary network traffic and waiting time.  The  `docker-registry` commanßd line utility can do the inspection without doing any image download by using the docker registry REST-API to query information about the image.
 
-## Examples
+The `docker-registry` lets you query the following info from a remote registry server: 
 
-Quickly query the available tags of the `ubunty` image: 
+* **tags** : the list of tags in a image repository on the server
+* **manifestlist** : for a multi-arch image for a specific tag a manifestlist lists the manifests for the different `os:arch` instances of an image
+* **manifist**: for each instance of an image a manifest is defined which describes from which parts the images is constructed, and how to download them
+* **digest**: SHA256 hash of the manifest content which acts as the identifier for a specific image on the server (Content Addressable IDs). Identifying the distribution recipe of the image.
+* **config**: each image has a configuration object
+* **id**:  SHA256 hash of the  configuration object which acts as the identifier for a specific image locally (Content Addressable IDs).
+* **labels**: the labels within the configuration object
+* **downloadlayer**: for a given layer digest, from the manifest, download the layer 
+
+The tool has also a command **verifytool** which purely is used to verify that the tool is still working correctly by checking that the digest/id communicated are the same as the  digest/id calculated from the downloaded manifest/configuration.
+
+The `docker-registry` is a command line utility is just a single `bash script`. <br/> This has the following advantages:
+
+* Easy to deploy<br> 
+  e.g. in github actions you can easily install by downloading it with the `curl` command. 
+* Reference usage<br>The script can act as a reference implementation of (a part) of the registry API.<br> Because the script is easily readable makes it usefull as documentation for how to query the registry server.
+
+## Quick tutorial ##
+
+Quickly query the available **tags** of the `ubunty` image: 
 
 
     $ docker-registry  tags library/ubuntu
@@ -12,31 +31,12 @@ Quickly query the available tags of the `ubunty` image:
 
 Combined with the `jq` tool we can filter the previous result to only show tags with '.04' in there name:
 
-	$ docker-registry  tags library/ubuntu | jq 'map( select( contains(".04") ))'
-	[
-	  "10.04",
-	  "12.04",
-	  "12.04.5",
-	  "13.04",
-	  "14.04",
-	  "14.04.1",
-	  "14.04.2",
-	  "14.04.3",
-	  "14.04.4",
-	  "14.04.5",
-	  "15.04",
-	  "16.04",
-	  "17.04",
-	  "18.04",
-	  "19.04",
-	  "20.04",
-	  "21.04",
-	  "22.04"
-	]   
-   
-We can also quickly inspect the metadata on a image using Labels:
+	$ docker-registry  tags library/ubuntu | jq -c 'map( select( contains("14.04") ))'
+	["14.04","14.04.1","14.04.2","14.04.3","14.04.4","14.04.5"]
 
-	$ docker-registry --arch amd64   config  sphinxdoc/sphinx | jq '.config.Labels'
+Quickly query the **labels** of an image: 
+
+	$  docker-registry --arch amd64   labels  sphinxdoc/sphinx:4.4.0
 	{
 	  "maintainer": "Sphinx Team <https://www.sphinx-doc.org/>",
 	  "org.opencontainers.image.created": "2022-01-16T15:19:24.686Z",
@@ -47,13 +47,38 @@ We can also quickly inspect the metadata on a image using Labels:
 	  "org.opencontainers.image.title": "docker",
 	  "org.opencontainers.image.url": "https://github.com/sphinx-doc/docker",
 	  "org.opencontainers.image.version": "4.4.0"
-	}   
+	}
 
 The OCI team published a [standardized set of keys](https://github.com/opencontainers/image-spec/blob/main/annotations.md)  all
-prefixed with `org.opencontainers.image.`. Above we can see some used in the Labels config section of the image.   
-   
-Inspect for which os/arch platforms an image is available by quering its manifestlist
-	   
+prefixed with `org.opencontainers.image.`. Above we can see some used in the Labels config section of the image. 
+	
+Note: with the `--arch amd64` you can select the architecture of the image. In the above case it is needed because the 	`sphinxdoc/sphinx` image is only available for `amd64`. If you are using a macbook with a `M1` `arm64` processor then the default architecture will be `arm64`. 
+
+A **manifestlist** gives an overview of all instances of an image for the different `os/arch` types. In the above case where only a single image exists, then there exists no manifestlist.  If you then request a manifestlist the utility gives an error, but still informs you about the existing single image:
+
+	$  docker-registry manifestlist  sphinxdoc/sphinx:4.4.0
+	ERROR: no manifestlist found, but there does exist a manifest for 'amd64/linux'
+	       with (manifest) digest 
+	       'sha256:d4ed92aa4c21c861adc325539b0049ab3e7acc4f7b73fa82e82702ebdfa2b8f4'
+
+The return **digest** uniquely identifies the image on the server without needing to specify `os/arch` or `tag`. So only using the `digest` we can query this specific image:
+
+	$  docker-registry id sphinxdoc/sphinx@sha256:d4ed92aa4c21c861adc325539b0049ab3e7acc4f7b73fa82e82702ebdfa2b8f4
+	sha256:4e019c638c3eb72844de0ef87479e4de467dfed199cb5d6d070607a20af6e9f1
+
+We can also query the image with using  `os/arch` and `tag`:
+
+
+	$ docker-registry --os linux --arch amd64 id  sphinxdoc/sphinx:4.4.0
+	sha256:4e019c638c3eb72844de0ef87479e4de467dfed199cb5d6d070607a20af6e9f1
+
+However note that in same cases the specific image behind a `tag` may be updated with security patches. This particulary holds for the `os` images as `ubuntu:18.04`.
+So over time the latter query may return a different image.
+
+The result of above queries is the **id** of the image, which indentifies the image locally on your machine after pulling it. Whereas the **digest** uniquely defines the image on the server. 
+ 
+In above case there was no **manifestlist**. No lets inspect the manifestlist for an image for which **many instances** for **different `os/arch` platforms** are defined:	   
+
 	$ docker-registry  manifestlist library/ubuntu:18.04
 	{
 		"manifests": [
@@ -88,25 +113,34 @@ Inspect for which os/arch platforms an image is available by quering its manifes
 		},
 	   ...
 
-Query an image digest (id) for a specific  os/arch:
+
+Using the digest in the above output we can query an image on the remote registry server. To verify this `digest` is correct we can also query the `digest` for a specific  `os/arch` and `tag`:
 
 	$ docker-registry --os linux --arch arm64  digest library/ubuntu:18.04
 	sha256:d62e3c99dcd0880f3d4f4c68db5462f883a5ce965b5149ca0e1490a267add8b0	    
-The digest founds matches the digest found for linux/arm64 in the manifestlist above.
-  
-Fetch the image id of an image 
+The digest found matches the digest found for linux/arm64 in the manifestlist above. 
 
-	$ docker-registry id library/ubuntu:18.04
+The digest is unique per image instance, eg. the `amd64` instance has a different digest:
+
+	$ docker-registry --os linux --arch amd64  digest library/ubuntu:18.04
+	sha256:a3a04a670edda3847f73eafacec1399210483f28b446e70ea87571f01df47d43
+
+An image `id` uniquely defines an image locally. Note that with `qemu` support in docker we can run image instances for different platforms the current platform docker is running on. Therefore also the image `id`'s of different `os/arch` instances are different:
+	
+	$ docker-registry --os linux --arch amd64  id library/ubuntu:18.04
+	sha256:eb2556e0f6e4dcf6a2b4820190d0013c83a97851c1444bc86bb09af085254850
+	$ docker-registry --os linux --arch arm64  id library/ubuntu:18.04
 	sha256:29e70752d7b2d3a4e9ab013cc75f4652bd41360a22ec3d0c64657e05c8b25ec8
 
-We can verify this is the right image id:  (needs pulling image)
+We can verify this the tool gives the right image id:  (needs pulling image)
 
-	# docker pull ubuntu:18.04
+	$ # run on m1 macbook (arm64)
+	$ docker pull ubuntu:18.04     
 	$ docker image ls
 	REPOSITORY                              TAG       IMAGE ID       CREATED       SIZE
 	ubuntu                                  18.04     29e70752d7b2   12 days ago   56.7MB
 
-We can fetch all info about the image by fetching its configuration object:
+Finally we can fetch all info about the image by fetching its configuration object:
 
 	$ docker-registry config library/ubuntu:18.04
 	{
@@ -121,7 +155,7 @@ The `config` command gives similar information as the `docker inspect` command, 
 
 We can fetch the config also for another platform:
 
-	$ docker-registry --os linux --arch amd64 config library/ubuntu:18.04 |head -10
+	$ docker-registry --os linux --arch amd64 config library/ubuntu:18.04
 	{
 	  "architecture": "amd64",
 	  "config": {
@@ -136,6 +170,55 @@ Using the `jq` tool we can easily fetch specific config values. For instance we 
 	[
 	  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	]
+	    
+The images `labels` are also part of the `config`, so with `jq` we can filter them also from the config: 
+
+	$ docker-registry --arch amd64   config  sphinxdoc/sphinx | jq '.config.Labels'
+	{
+	  "maintainer": "Sphinx Team <https://www.sphinx-doc.org/>",
+	  "org.opencontainers.image.created": "2022-01-16T15:19:24.686Z",
+	  "org.opencontainers.image.description": "",
+	  "org.opencontainers.image.licenses": "",
+	  "org.opencontainers.image.revision": "03e2a663ba5eff8f460336c59e732283d37ea0f6",
+	  "org.opencontainers.image.source": "https://github.com/sphinx-doc/docker",
+	  "org.opencontainers.image.title": "docker",
+	  "org.opencontainers.image.url": "https://github.com/sphinx-doc/docker",
+	  "org.opencontainers.image.version": "4.4.0"
+	}  
+
+The `labels` command is extra defined for the convenience of easily fetching the labels and does exactly the above.	
+
+ 
+## Installation ##
+
+
+
+The `docker-registry` utility is a simple script in `bash`, so you can easily fetch it from a release file on github:
+
+
+    VERSION="v1.0.1" 
+    DOWNLOAD_URL="https://github.com/harcokuppens/docker-registry/archive/refs/tags/${VERSION}.tar.gz"
+	curl -s -L "$DOWNLOAD_URL" | tar -xvz -C "/tmp/ docker-registry-${VERSION}/docker-registry"
+	mv /tmp/docker-registry-${VERSION}/docker-registry /usr/local/bin 
+	chmod a+x /usr/local/bin/docker-registry
+	export PATH="$PATH:/usr/local/bin"
+
+      
+Requirements:  
+
+* `bash` shell
+* `sed` filter tool
+* `cat` tool
+* `jq`  json query tool 
+* `curl` http request tool
+* `sha256sum` checksum tool
+* `cut` tool
+
+Most tools, except `curl` and `jq` are normally installed in a `bash` shell environment.
+
+      
+For Windows you could use WSL to run the `docker-registry` utility. You can also install the `docker-registry` utility natively with [Git for Windows](https://gitforwindows.org) to get a bash shell to run the script. In the latter case you have to write a wrapper `.cmd` script to call `bash.exe docker-registry` with the right paths. The wrapper script is needed because Windows doesn't support the shebang execution used in linux/macos.      
+	    
 	    
 ## Usage ##
   
@@ -163,7 +246,8 @@ Using the `jq` tool we can easily fetch specific config values. For instance we 
 
       docker-registry [options] id [REGISTRY/]IMAGE[:TAG|@DIGEST]
       docker-registry [options] config [REGISTRY/]IMAGE[:TAG|@DIGEST]
-
+      docker-registry [options] labels [REGISTRY/]IMAGE[:TAG|@DIGEST]
+      
       docker-registry [options] downloadlayer [REGISTRY/]IMAGE@LAYER_DIGEST
 
       docker-registry           verifytool [REGISTRY/]IMAGE[:TAG]
@@ -189,6 +273,10 @@ Using the `jq` tool we can easily fetch specific config values. For instance we 
 
 ### Inception of this script ###
 
+Artilce Explaining Docker Image IDs
+ 
+ * [article Explaining Docker Image IDs](https://windsock.io/explaining-docker-image-ids/)
+
 Articles about using registry REST-API on:
 
 * docker's registry(docker.io): [article "Inspecting Docker images without pulling them"](https://medium.com/hackernoon/inspecting-docker-images-without-pulling-them-4de53d34a604)
@@ -201,9 +289,6 @@ Registry API
  
  * [Reference documentation Registry API](https://docs.docker.com/registry/spec/api/)
 
-Explaining Docker Image IDs
- 
- * [article Explaining Docker Image IDs](https://windsock.io/explaining-docker-image-ids/)
 
 Manifest
   
@@ -219,7 +304,7 @@ OAuth
 
  * [What is OAuth really all about (using JWT toke) - OAuth tutorial - Java Brains](https://www.youtube.com/watch?v=t4-416mg6iU)
  * [OAuth terminologies and flows explained  - OAuth tutorial - Java Brains](https://www.youtube.com/watch?v=3pZ3Nh8tgTE) <br/>
-   => flow 3 is used where in the first step you also authenticate with user/password credentials to get authorization token (in JWT format)
+   note: flow 3 is used where in the first step you also authenticate with user/password credentials to get authorization token (in JWT format)
    
 JWT
 
@@ -229,12 +314,17 @@ JWT
 
 # Alternatives for this script #
 
-* `skopeo inspect`: alternative for this script's `config` command
-    https://polyverse.com/blog/skopeo-the-best-container-tool-you-need-to-know-about/
-    https://github.com/containers/skopeo
+There are some alternatives for the `docker-registry` utility, but for querying a remote registry the `docker-registry` works better then all of them.
 
-* [docker manifest](https://docs.docker.com/engine/reference/commandline/manifest/): alternative for this script's `manifest` `manifestlist` commands
+* `skopeo inspect`: alternative for this script's `config` command
+   *  [article about skopeo](https://polyverse.com/blog/skopeo-the-best-container-tool-you-need-to-know-about/)
+   *   [https://github.com/containers/skopeo](https://github.com/containers/skopeo)
+
+* [docker manifest](https://docs.docker.com/engine/reference/commandline/manifest/): alternative for this script's `manifestlist` and `manifest` commands
  
 
-* `manifest-tool`: alternative for this script's `manifest` `manifestlist` commands
-    https://github.com/estesp/manifest-tool
+* [manifest-tool](https://github.com/estesp/manifest-tool): alternative for this script's  `manifestlist` and `manifest` commands. This tool does not allow to see the manifest of an image without a manifestlist. 
+    
+    
+
+    

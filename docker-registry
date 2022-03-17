@@ -30,6 +30,7 @@ USAGE="
 
       docker-registry [options] id [REGISTRY/]IMAGE[:TAG|@DIGEST]
       docker-registry [options] config [REGISTRY/]IMAGE[:TAG|@DIGEST]
+      docker-registry [options] labels [REGISTRY/]IMAGE[:TAG|@DIGEST]
 
       docker-registry [options] downloadlayer [REGISTRY/]IMAGE@LAYER_DIGEST
 
@@ -198,9 +199,9 @@ main() {
   local argument="$2"
 
   # verify command argument
-  if  ! [[ "$command" == "tags"  || "$command" == "config" || "$command" == "id" || "$command" == "digest" ||  "$command" == "manifestlist" ||  "$command" == "manifest"  ||  "$command" == "downloadlayer" ||  "$command" == "verifytool" ]]
+  if  ! [[ "$command" == "tags"  || "$command" == "labels" || "$command" == "config" || "$command" == "id" || "$command" == "digest" ||  "$command" == "manifestlist" ||  "$command" == "manifest"  ||  "$command" == "downloadlayer" ||  "$command" == "verifytool" ]]
   then
-      printf "\nERROR: wrong command '$1'; command must be in [config,id,digest,downloadlayer,manifest,manifestlist,tags]\n$USAGE" >&2
+      printf "\nERROR: wrong command '$1'; command must be in [config,id,digest,downloadlayer,labels,manifest,manifestlist,tags]\n$USAGE" >&2
       exit 1
   fi
 
@@ -429,6 +430,21 @@ main() {
       config_digest=$(get_config_digest "$image" "$digest")
       # image id is the digest of the configuration object of the image
       echo -E "$config_digest"
+  fi
+
+  if  [[ "$command" == "labels" ]]
+  then
+      if [[ "$digest" == "" ]]
+      then
+          # get digest of manifest of image for a tag for the current selected os/arch
+          digest=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+      fi
+
+      # declaration must be separate from assignment with command substition for errors to be caught
+      # see: https://stackoverflow.com/questions/20157938/exit-code-of-variable-assignment-to-command-substitution-in-bash#comment38560986_20157997
+      local config_digest=""
+      config_digest=$(get_config_digest "$image" "$digest")
+      get_image_configuration "$image" "$config_digest" |  jq '.config.Labels'
   fi
 
   if  [[ "$command" == "downloadlayer" ]]
