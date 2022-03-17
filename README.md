@@ -27,6 +27,7 @@ The tool has also a command **verifytool** which purely is used to verify that t
 
 The `docker-registry` is a command line utility is just a single `bash script`. <br/> This has the following advantages:
 
+* Doesn't need `docker` to be installed to work!
 * Easy to deploy<br> 
   e.g. in github actions you can easily install by downloading it with the `curl` command. 
 * Reference usage<br>The script can act as a reference implementation of (a part) of the registry API.<br> Because the script is easily readable makes it usefull as documentation for how to query the registry server.
