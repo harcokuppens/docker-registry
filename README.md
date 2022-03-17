@@ -10,7 +10,7 @@
 
 
 ## Description ##
-The `docker-registry` is a command line utility than fetches image info from a remote docker registry without needing to download the image. The command `docker inspect` works only on local images which first must be downloaded using `docker pull`. For inspecting a large image on the registry this causes unnecessary network traffic and waiting time.  The  `docker-registry` commanßd line utility can do the inspection without doing any image download by using the docker registry REST-API to query information about the image.
+The `docker-registry` is a command line utility than fetches image info from a remote docker registry without needing to download the image. The command `docker inspect` works only on local images which first must be downloaded using `docker pull`. For inspecting a large image on the registry this causes unnecessary network traffic and waiting time.  The  `docker-registry` command line utility can do the inspection without doing any image download by using the docker registry REST-API to query information about the image.
 
 The `docker-registry` lets you query the following info from a remote registry server: 
 
