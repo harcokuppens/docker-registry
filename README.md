@@ -1,6 +1,5 @@
 # docker-registry <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *query a registry without downloading images* #
 
-
 * [Description](#description)
 * [Quick tutorial](#quick-tutorial)
 * [Installation](#installation)
@@ -16,7 +15,7 @@ The `docker-registry` lets you query the following info from a remote registry s
 
 * **tags** : the list of tags in a image repository on the server
 * **manifestlist** : for a multi-arch image for a specific tag a manifestlist lists the manifests for the different `os:arch` instances of an image
-* **manifist**: for each instance of an image a manifest is defined which describes from which parts the images is constructed, and how to download them
+* **manifest**: for each instance of an image a manifest is defined which describes from which parts the images is constructed, and how to download them
 * **digest**: SHA256 hash of the manifest content which acts as the identifier for a specific image on the server (Content Addressable IDs). Identifying the distribution recipe of the image.
 * **config**: each image has a configuration object
 * **id**:  SHA256 hash of the  configuration object which acts as the identifier for a specific image locally (Content Addressable IDs).
@@ -31,6 +30,7 @@ The `docker-registry` is a command line utility is just a single `bash script`. 
 * Easy to deploy<br> 
   e.g. in github actions you can easily install by downloading it with the `curl` command. 
 * Reference usage<br>The script can act as a reference implementation of (a part) of the registry API.<br> Because the script is easily readable makes it usefull as documentation for how to query the registry server.
+
 
 ## Quick tutorial ##
 
@@ -328,6 +328,9 @@ JWT
 
 
 ## Alternatives for this script ##
+
+
+**UPDATE:** I recently discovered another tool called [regclient](https://github.com/regclient/regclient) which can do the same, and can also copy multi-arch images efficiently between different registries. For real usage I would recomment that tool instead. However this script can still be a good guidance for anyone wanting to learn how the registry API works, and for simply querying labels this script is also fine. You can even copy just the lines of code from the script doing the label query for an efficient solution.
 
 There are some alternatives for the `docker-registry` utility, but for querying a remote registry the `docker-registry` works better then all of them.
 
