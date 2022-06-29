@@ -215,7 +215,7 @@ The `docker-registry` utility is a simple script in `bash`, so you can easily fe
     VERSION="v1.0.1" 
     INSTALL_DIR=/usr/local/bin.  # make sure INSTALL_DIR is in your PATH environment variable
     DOWNLOAD_URL="https://raw.githubusercontent.com/harcokuppens/docker-registry/${VERSION}/docker-registry"
-    curl -o ${INSTALL_DIR}/docker-registry  "$DOWNLOAD_URL"
+    curl -Lo ${INSTALL_DIR}/docker-registry  "$DOWNLOAD_URL"
     chmod a+x ${INSTALL_DIR}/docker-registry
     
       
