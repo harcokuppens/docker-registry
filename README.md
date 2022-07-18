@@ -17,9 +17,11 @@ The `docker-registry` lets you query the following info from a remote registry s
 * **manifestlist** : for a multi-arch image for a specific tag a manifestlist lists the manifests for the different `os:arch` instances of an image
 * **manifest**: for each instance of an image a manifest is defined which describes from which parts the images is constructed, and how to download them
 * **digest**: SHA256 hash of the manifest content which acts as the identifier for a specific image on the server (Content Addressable IDs). Identifying the distribution recipe of the image.
+* **digestlist** : SHA256 hash of the manifestlist content which acts as identifier for a multi-arch image on the server (Content Addressable IDs). When you pull a multi-arch image, then docker automatically fetches the image from the manifestlist for your local architecture. However the digest listed by `docker image ls --digests` command is the digest of the manifestlist, and not the digest of the digest of the manifest of the image. This makes it easier to pull the 'same' image on a different architecture. Because you can pull an image with the same digest on the different architecture. You then get the image build for that architecture.
 * **config**: each image has a configuration object
 * **id**:  SHA256 hash of the  configuration object which acts as the identifier for a specific image locally (Content Addressable IDs).
 * **labels**: the labels within the configuration object
+* **history**: the history within the configuration object
 * **downloadlayer**: for a given layer digest, from the manifest, download the layer 
 
 The tool has also a command **verifytool** which purely is used to verify that the tool is still working correctly by checking that the digest/id communicated are the same as the  digest/id calculated from the downloaded manifest/configuration.
@@ -125,10 +127,12 @@ In above case there was no **manifestlist**. No lets inspect the manifestlist fo
 	   ...
 
 
-Using the digest in the above output we can query an image on the remote registry server. To verify this `digest` is correct we can also query the `digest` for a specific  `os/arch` and `tag`:
+
+Using the digest in the above manifestlist we can query an image on the remote registry server. To verify this `digest` is correct we can also query the `digest` for a specific  `os/arch` and `tag`:
 
 	$ docker-registry --os linux --arch arm64  digest library/ubuntu:18.04
 	sha256:d62e3c99dcd0880f3d4f4c68db5462f883a5ce965b5149ca0e1490a267add8b0	    
+
 The digest found matches the digest found for linux/arm64 in the manifestlist above. 
 
 The digest is unique per image instance, eg. the `amd64` instance has a different digest:
@@ -150,6 +154,30 @@ We can verify this the tool gives the right image id:  (needs pulling image)
 	$ docker image ls
 	REPOSITORY                              TAG       IMAGE ID       CREATED       SIZE
 	ubuntu                                  18.04     29e70752d7b2   12 days ago   56.7MB
+
+We can also query the digest of the manifestlist:
+
+    $ docker-registry  digestlist library/ubuntu:18.04
+    478caf1bec1afd54a58435ec681c8755883b7eb843a8630091890130b15a79af
+
+This manifestlist digest is registred by docker as the digest when pulling an multi-arch image.  This makes it easier to pull the 'same' image on a different architecture. 
+Because you can pull an image with the same digest on the different architecture. You then get the image build for that architecture. However keep in mind that
+the manifest of the pulled image for the specified platform has a different digest, as you can see below:
+
+    $ docker pull  ubuntu:18.04
+    18.04: Pulling from library/ubuntu
+    8376114ff9b3: Pull complete
+    Digest: sha256:478caf1bec1afd54a58435ec681c8755883b7eb843a8630091890130b15a79af
+    Status: Downloaded newer image for ubuntu:18.04
+    docker.io/library/ubuntu:18.04
+    
+    $ docker image ls --digests
+    REPOSITORY            TAG       DIGEST                                                                    IMAGE ID       CREATED        SIZE
+    ubuntu                18.04     sha256:478caf1bec1afd54a58435ec681c8755883b7eb843a8630091890130b15a79af   f9ea66feed08   5 weeks ago    56.7MB
+
+    $ docker-registry digest  library/ubuntu:18.04
+    sha256:6a4619c02fbaf80504f316f42bd4b732831d9590e9c1c0df2b6f294ffbee86c9
+ 
 
 Finally we can fetch all info about the image by fetching its configuration object:
 
@@ -213,7 +241,7 @@ The `docker-registry` utility is a simple script in `bash`, so you can easily fe
 
 
     VERSION="v1.0.1" 
-    INSTALL_DIR=/usr/local/bin.  # make sure INSTALL_DIR is in your PATH environment variable
+    INSTALL_DIR=/usr/local/bin  # make sure INSTALL_DIR is in your PATH environment variable
     DOWNLOAD_URL="https://raw.githubusercontent.com/harcokuppens/docker-registry/${VERSION}/docker-registry"
     curl -o ${INSTALL_DIR}/docker-registry  "$DOWNLOAD_URL"
     chmod a+x ${INSTALL_DIR}/docker-registry
@@ -249,10 +277,13 @@ For Windows you could use WSL to run the `docker-registry` utility. You can also
       The content addressable setup of docker means that we have
        * digest: id for a manifest; the sha256 digest of the image manifest.
        * id : id for the image; the sha256 digest of the image config.
+       
+      For more documentation and a tutorial see https://github.com/harcokuppens/docker-registry .
 
     Usage:
       docker-registry [options] tags [REGISTRY/]IMAGE
 
+      docker-registry [options] digestlist [REGISTRY/]IMAGE[:TAG]
       docker-registry [options] manifestlist [REGISTRY/]IMAGE[:TAG]
 
       docker-registry [options] digest [REGISTRY/]IMAGE[:TAG]
@@ -262,7 +293,8 @@ For Windows you could use WSL to run the `docker-registry` utility. You can also
       docker-registry [options] id [REGISTRY/]IMAGE[:TAG|@DIGEST]
       docker-registry [options] config [REGISTRY/]IMAGE[:TAG|@DIGEST]
       docker-registry [options] labels [REGISTRY/]IMAGE[:TAG|@DIGEST]
-      
+      docker-registry [options] history [REGISTRY/]IMAGE[:TAG|@DIGEST]
+
       docker-registry [options] downloadlayer [REGISTRY/]IMAGE@LAYER_DIGEST
 
       docker-registry           verifytool [REGISTRY/]IMAGE[:TAG]
@@ -271,16 +303,29 @@ For Windows you could use WSL to run the `docker-registry` utility. You can also
       -h  or  --help                print help (this message) and exit
       -r                            enables raw output. Without this option the json output will be human
                                     readable formatted.
-      -u PERSON_OR_ORG:PASSWORD     credentials needed only for accessing none-public images
+      -u PERSON_OR_ORG:PWD_OR_PAT   credentials needed only for accessing none-public images
+                                    Can also be set with environment variable DOCKER_REGISTRY_CREDENTIALS.
+                                    Note: you get denied access when quering public docker images with credentials, 
+                                    so make sure to unset DOCKER_REGISTRY_CREDENTIALS when querying them.
       --os OS                       specify the operating system of the image (default is linux)
       --arch ARCH                   specify the cpu architecture of the image (default is arch of current machine)
 
     Notes:
       The REGISTRY argument is by default 'docker.io', for github's registry you should use 'ghcr.io'.
+      
       The LAYER_DIGEST argument can be found in the manifest of an image where for each layer its digest and its size
-           is specified.  Note: don't use the digests in the image config, because they are digests from the
-           unpacked layers. Whereas the manifest contains digests for the compressed layers ready for fast downloads.
-
+      is specified.  Note: don't use the digests in the image config, because they are digests from the
+      unpacked layers. Whereas the manifest contains digests for the compressed layers to support fast downloads.
+      
+      The official images on https://hub.docker.com/ such as 'ubuntu' need 'library/' as prefix. However like the docker 
+      command the docker-registry command automatically adds the 'library/' prefix when it is not supplied. 
+      So following also works:
+      
+          $ docker-registry  tags ubuntu
+          [\"10.04\",\"12.04\",\"12.04.5\",\"12.10\",\"13.04\",\"13.10\", ... ]
+          
+      Also make sure you have DOCKER_REGISTRY_CREDENTIALS unset, because otherwise above command will fail for this public image.     
+      The github repo for the official images is at https://github.com/docker-library/official-images.
 
 
 ## Background documentation ##
@@ -342,6 +387,8 @@ There are some alternatives for the `docker-registry` utility, but for querying 
  
 
 * [manifest-tool](https://github.com/estesp/manifest-tool): alternative for this script's  `manifestlist` and `manifest` commands. This tool does not allow to see the manifest of an image without a manifestlist. 
+
+* [dive](https://github.com/wagoodman/dive): Not an alternative for docker-registry, but because this is such handy tool to inspect a pulled image I still want to mention it. Dive is a tool for exploring a docker image, layer contents, and discovering ways to shrink the size of your Docker/OCI image.
     
     
 

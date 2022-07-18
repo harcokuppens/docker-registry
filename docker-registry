@@ -18,10 +18,13 @@ USAGE="
       The content addressable setup of docker means that we have
        * digest: id for a manifest; the sha256 digest of the image manifest.
        * id : id for the image; the sha256 digest of the image config.
+       
+      For more documentation and a tutorial see https://github.com/harcokuppens/docker-registry .
 
     Usage:
       docker-registry [options] tags [REGISTRY/]IMAGE
 
+      docker-registry [options] digestlist [REGISTRY/]IMAGE[:TAG]
       docker-registry [options] manifestlist [REGISTRY/]IMAGE[:TAG]
 
       docker-registry [options] digest [REGISTRY/]IMAGE[:TAG]
@@ -31,6 +34,7 @@ USAGE="
       docker-registry [options] id [REGISTRY/]IMAGE[:TAG|@DIGEST]
       docker-registry [options] config [REGISTRY/]IMAGE[:TAG|@DIGEST]
       docker-registry [options] labels [REGISTRY/]IMAGE[:TAG|@DIGEST]
+      docker-registry [options] history [REGISTRY/]IMAGE[:TAG|@DIGEST]
 
       docker-registry [options] downloadlayer [REGISTRY/]IMAGE@LAYER_DIGEST
 
@@ -40,15 +44,29 @@ USAGE="
       -h  or  --help                print help (this message) and exit
       -r                            enables raw output. Without this option the json output will be human
                                     readable formatted.
-      -u PERSON_OR_ORG:PASSWORD     credentials needed only for accessing none-public images
+      -u PERSON_OR_ORG:PWD_OR_PAT   credentials needed only for accessing none-public images
+                                    Can also be set with environment variable DOCKER_REGISTRY_CREDENTIALS.
+                                    Note: you get denied access when quering public docker images with credentials, 
+                                    so make sure to unset DOCKER_REGISTRY_CREDENTIALS when querying them.
       --os OS                       specify the operating system of the image (default is linux)
       --arch ARCH                   specify the cpu architecture of the image (default is arch of current machine)
 
     Notes:
       The REGISTRY argument is by default 'docker.io', for github's registry you should use 'ghcr.io'.
+      
       The LAYER_DIGEST argument can be found in the manifest of an image where for each layer its digest and its size
-           is specified.  Note: don't use the digests in the image config, because they are digests from the
-           unpacked layers. Whereas the manifest contains digests for the compressed layers ready for fast downloads.
+      is specified.  Note: don't use the digests in the image config, because they are digests from the
+      unpacked layers. Whereas the manifest contains digests for the compressed layers to support fast downloads.
+      
+      The official images on https://hub.docker.com/ such as 'ubuntu' need 'library/' as prefix. However like the docker 
+      command the docker-registry command automatically adds the 'library/' prefix when it is not supplied. 
+      So following also works:
+      
+          $ docker-registry  tags ubuntu
+          [\"10.04\",\"12.04\",\"12.04.5\",\"12.10\",\"13.04\",\"13.10\", ... ]
+          
+      Also make sure you have DOCKER_REGISTRY_CREDENTIALS unset, because otherwise above command will fail for this public image.     
+      The github repo for the official images is at https://github.com/docker-library/official-images.
 
 "
 
@@ -112,7 +130,6 @@ set -eE  # BEST: traps error in subshell with right linenumber in code
 set -u   # script ends with signal EXIT when unset variable is used
 #trap 'printf "\ntrap ERR errorcode:$? at linenumber:$LINENO !\n"' ERR
 #set -x # trace
-
 
 
 # https://unix.stackexchange.com/questions/256873/error-exit-script-from-within-command-substitution
@@ -186,6 +203,11 @@ main() {
       fi 
   done
 
+ 
+  if [[ -z "$credentials" && -n "${DOCKER_REGISTRY_CREDENTIALS-}" ]] 
+  then
+     credentials="${DOCKER_REGISTRY_CREDENTIALS}"
+  fi
   
   # get args
 
@@ -199,9 +221,9 @@ main() {
   local argument="$2"
 
   # verify command argument
-  if  ! [[ "$command" == "tags"  || "$command" == "labels" || "$command" == "config" || "$command" == "id" || "$command" == "digest" ||  "$command" == "manifestlist" ||  "$command" == "manifest"  ||  "$command" == "downloadlayer" ||  "$command" == "verifytool" ]]
+  if  ! [[ "$command" == "tags"  || "$command" == "labels" || "$command" == "history" || "$command" == "config" || "$command" == "id" || "$command" == "digest" ||  "$command" == "digestlist" ||  "$command" == "manifestlist" ||  "$command" == "manifest"  ||  "$command" == "downloadlayer" ||  "$command" == "verifytool" ]]
   then
-      printf "\nERROR: wrong command '$1'; command must be in [config,id,digest,downloadlayer,labels,manifest,manifestlist,tags]\n$USAGE" >&2
+      printf "\nERROR: wrong command '$1'; command must be in [config,id,digest,digestlist,downloadlayer,labels,history,manifest,manifestlist,tags]\n$USAGE" >&2
       exit 1
   fi
 
@@ -303,6 +325,12 @@ main() {
       image="$argument"
     fi
   fi
+  
+  if [[ "$image" != *"/"* ]]
+  then
+      # NOTE: if '$image' is a public image then you need to prefix it with 'library/', so instead use: 'library/$image'
+      image="library/$image" 
+  fi  
 
   if [[ "$tag" == "sha256:"* ]]
   then
@@ -349,6 +377,17 @@ main() {
      get_image_tags  "$image"
   fi
 
+  if  [[ "$command" == "digestlist" ]]
+  then
+      manifestlist=$(get_manifestlist "$image" "$tag")
+      if [[ "$manifestlist" == *"manifest.list"* ]]; then
+          # its a manifestlist; return it
+          echo -E -n  "$manifestlist" | sha256sum | cut -d' ' -f1
+      else
+          echo "ERROR: no manifestlist found" >&2
+          exit 1
+      fi       
+  fi 
   if  [[ "$command" == "manifestlist" ]]
   then
       manifestlist=$(get_manifestlist "$image" "$tag")
@@ -445,6 +484,21 @@ main() {
       local config_digest=""
       config_digest=$(get_config_digest "$image" "$digest")
       get_image_configuration "$image" "$config_digest" |  jq '.config.Labels'
+  fi
+  
+  if  [[ "$command" == "history" ]]
+  then
+      if [[ "$digest" == "" ]]
+      then
+          # get digest of manifest of image for a tag for the current selected os/arch
+          digest=$(get_manifest_digest_for_a_tag_for_a_specific_os_arch "$image" "$tag")
+      fi
+
+      # declaration must be separate from assignment with command substition for errors to be caught
+      # see: https://stackoverflow.com/questions/20157938/exit-code-of-variable-assignment-to-command-substitution-in-bash#comment38560986_20157997
+      local config_digest=""
+      config_digest=$(get_config_digest "$image" "$digest")
+      get_image_configuration "$image" "$config_digest" |  jq '.history'
   fi
 
   if  [[ "$command" == "downloadlayer" ]]
@@ -573,6 +627,11 @@ verify_json_result() {
            printf "\nERROR: in $location:\n" >&2
            echo -E -n "$json_result"| jq >&2
          fi
+         if [[ -n "$credentials" || -n "${DOCKER_REGISTRY_CREDENTIALS-}" ]] 
+         then
+            echo  "NOTE: credentials are used; querying public repositories only works without credentials! "  >&2
+         fi
+         
          exit 1;
      fi
 }
